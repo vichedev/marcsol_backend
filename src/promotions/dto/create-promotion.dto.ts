@@ -1,6 +1,7 @@
 import {
     IsBoolean,
     IsDateString,
+    IsEnum,
     IsInt,
     IsNotEmpty,
     IsOptional,
@@ -9,6 +10,7 @@ import {
     Min,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { PromotionLayout } from '../entities/promotion.entity';
 
 export class CreatePromotionDto {
     @IsString()
@@ -42,6 +44,10 @@ export class CreatePromotionDto {
     @IsInt()
     @Min(0)
     displayOrder?: number;
+
+    @IsOptional()
+    @IsEnum(PromotionLayout)
+    layout?: PromotionLayout;
 
     @IsOptional()
     @IsDateString()

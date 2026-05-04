@@ -73,7 +73,8 @@ export class AutoSeedService implements OnApplicationBootstrap {
                 'IMPORTANTE: inicia sesión y cambia la contraseña por defecto.',
             );
         } catch (err) {
-            this.logger.error('Error en auto-seed:', err.message);
+            const message = err instanceof Error ? err.message : String(err);
+            this.logger.error(`Error en auto-seed: ${message}`);
         }
     }
 }

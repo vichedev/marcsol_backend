@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThanOrEqual, MoreThanOrEqual, Repository, IsNull } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
+import { ReorderDto } from '../common/dto/reorder.dto';
 import { Promotion } from './entities/promotion.entity';
 import { CreatePromotionDto } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
@@ -10,7 +11,28 @@ export class PromotionsService {
     constructor(
         @InjectRepository(Promotion)
         private readonly promotionRepository: Repository<Promotion>,
+        private readonly dataSource: DataSource,
     ) { }
+
+    async reorder(dto: ReorderDto): Promise<{ affected: number }> {
+        const ids = dto.items.map((i) => i.id);
+        const found = await this.promotionRepository.count({
+            where: { id: In(ids) },
+        });
+        if (found !== ids.length) {
+            throw new NotFoundException(
+                'Una o más promociones del lote no existen',
+            );
+        }
+        await this.dataSource.transaction(async (manager) => {
+            for (const item of dto.items) {
+                await manager.update(Promotion, item.id, {
+                    displayOrder: item.displayOrder,
+                });
+            }
+        });
+        return { affected: ids.length };
+    }
 
     async create(dto: CreatePromotionDto): Promise<Promotion> {
         const promotion: Promotion = this.promotionRepository.create(dto);

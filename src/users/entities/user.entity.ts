@@ -35,10 +35,25 @@ export class User {
     @Column({ default: true })
     isActive: boolean;
 
-    // Marca al super admin original (creado por el auto-seed).
-    // No se puede desactivar ni eliminar para evitar bloqueos del sistema.
     @Column({ default: false })
     isSeed: boolean;
+
+    /** Fuerza al usuario a cambiar la contraseña la próxima vez que entre. */
+    @Column({ default: false })
+    mustChangePassword: boolean;
+
+    /** Secret TOTP (base32) — se guarda cifrado por simplicidad como string. */
+    @Column({ type: 'varchar', length: 200, nullable: true })
+    totpSecret: string | null;
+
+    @Column({ default: false })
+    totpEnabled: boolean;
+
+    @Column({ type: 'timestamp', nullable: true })
+    lastLoginAt: Date | null;
+
+    @Column({ type: 'int', default: 0 })
+    failedLoginAttempts: number;
 
     @CreateDateColumn()
     createdAt: Date;

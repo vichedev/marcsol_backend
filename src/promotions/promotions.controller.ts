@@ -11,6 +11,7 @@ import {
 import { PromotionsService } from './promotions.service';
 import { CreatePromotionDto } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
+import { ReorderDto } from '../common/dto/reorder.dto';
 import { Public } from '../auth/decorators/public.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -31,6 +32,12 @@ export class PromotionsController {
     @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
     findAllAdmin() {
         return this.promotionsService.findAllAdmin();
+    }
+
+    @Patch('reorder')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    reorder(@Body() dto: ReorderDto) {
+        return this.promotionsService.reorder(dto);
     }
 
     @Get(':id')

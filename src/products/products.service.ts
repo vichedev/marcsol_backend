@@ -4,7 +4,7 @@ import {
     ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Product } from './entities/product.entity';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -23,8 +23,9 @@ export class ProductsService {
         const product = this.productRepository.create({ ...dto, slug });
         try {
             return await this.productRepository.save(product);
-        } catch (err: any) {
-            if (err.code === '23505') {
+        } catch (err) {
+            const code = (err as { code?: string }).code;
+            if (code === '23505') {
                 throw new ConflictException('Ya existe un producto similar');
             }
             throw err;
@@ -47,7 +48,9 @@ export class ProductsService {
         const qb = this.productRepository
             .createQueryBuilder('product')
             .leftJoinAndSelect('product.category', 'category')
-            .where('product.isActive = :active', { active: true });
+            .where('product.isActive = :active', { active: true })
+            // Solo productos publicados son visibles públicamente.
+            .andWhere('product.status = :status', { status: 'PUBLISHED' });
 
         if (categoryId) {
             qb.andWhere('product.categoryId = :categoryId', { categoryId });
@@ -99,7 +102,8 @@ export class ProductsService {
     async findOne(id: string): Promise<Product> {
         const product = await this.productRepository.findOne({
             where: { id },
-            relations: ['category'],
+            relations: ['category', 'images'],
+            order: { images: { sortOrder: 'ASC' } },
         });
         if (!product) {
             throw new NotFoundException('Producto no encontrado');
@@ -124,6 +128,24 @@ export class ProductsService {
         if (result.affected === 0) {
             throw new NotFoundException('Producto no encontrado');
         }
+    }
+
+    async bulkUpdate(
+        ids: string[],
+        patch: Partial<Pick<Product, 'isActive' | 'isFeatured' | 'categoryId'>>,
+    ): Promise<{ affected: number }> {
+        if (ids.length === 0) return { affected: 0 };
+        const result = await this.productRepository.update(
+            { id: In(ids) },
+            patch,
+        );
+        return { affected: result.affected ?? 0 };
+    }
+
+    async bulkRemove(ids: string[]): Promise<{ affected: number }> {
+        if (ids.length === 0) return { affected: 0 };
+        const result = await this.productRepository.delete({ id: In(ids) });
+        return { affected: result.affected ?? 0 };
     }
 
     private async generateUniqueSlug(name: string, excludeId?: string): Promise<string> {

@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { AdPosition, Advertisement } from './entities/advertisement.entity';
+import { ReorderDto } from '../common/dto/reorder.dto';
 import { CreateAdvertisementDto } from './dto/create-advertisement.dto';
 import { UpdateAdvertisementDto } from './dto/update-advertisement.dto';
 
@@ -10,7 +11,26 @@ export class AdvertisementsService {
     constructor(
         @InjectRepository(Advertisement)
         private readonly adRepository: Repository<Advertisement>,
+        private readonly dataSource: DataSource,
     ) { }
+
+    async reorder(dto: ReorderDto): Promise<{ affected: number }> {
+        const ids = dto.items.map((i) => i.id);
+        const found = await this.adRepository.count({ where: { id: In(ids) } });
+        if (found !== ids.length) {
+            throw new NotFoundException(
+                'Una o más publicidades del lote no existen',
+            );
+        }
+        await this.dataSource.transaction(async (manager) => {
+            for (const item of dto.items) {
+                await manager.update(Advertisement, item.id, {
+                    displayOrder: item.displayOrder,
+                });
+            }
+        });
+        return { affected: ids.length };
+    }
 
     async create(dto: CreateAdvertisementDto): Promise<Advertisement> {
         const ad: Advertisement = this.adRepository.create(dto);

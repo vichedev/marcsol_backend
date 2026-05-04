@@ -17,9 +17,16 @@ import type { Response } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ProductsService } from './products.service';
 import { ProductsImportService } from './products-import.service';
+import { ProductImagesService } from './product-images.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductDto } from './dto/query-product.dto';
+import { BulkUpdateDto, BulkDeleteDto } from './dto/bulk-operations.dto';
+import {
+    AddProductImageDto,
+    ReorderProductImagesDto,
+    UpdateProductImageDto,
+} from './dto/product-image.dto';
 import { Public } from '../auth/decorators/public.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -29,6 +36,7 @@ export class ProductsController {
     constructor(
         private readonly productsService: ProductsService,
         private readonly productsImportService: ProductsImportService,
+        private readonly productImagesService: ProductImagesService,
     ) { }
 
     // ─── Endpoints de importación (antes de los :id genéricos) ───
@@ -98,6 +106,20 @@ export class ProductsController {
         return this.productsService.findAllAdmin();
     }
 
+    // ─── Acciones masivas (bulk) ───
+
+    @Patch('bulk')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    bulkUpdate(@Body() dto: BulkUpdateDto) {
+        return this.productsService.bulkUpdate(dto.ids, dto.patch);
+    }
+
+    @Delete('bulk')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    bulkRemove(@Body() dto: BulkDeleteDto) {
+        return this.productsService.bulkRemove(dto.ids);
+    }
+
     // ─── Endpoints públicos ───
 
     @Public()
@@ -133,5 +155,59 @@ export class ProductsController {
     @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
     remove(@Param('id', ParseUUIDPipe) id: string) {
         return this.productsService.remove(id);
+    }
+
+    // ─── Galería multi-imagen ───
+
+    @Public()
+    @Get(':id/images')
+    listImages(@Param('id', ParseUUIDPipe) id: string) {
+        return this.productImagesService.list(id);
+    }
+
+    @Post(':id/images')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    addImage(
+        @Param('id', ParseUUIDPipe) id: string,
+        @Body() dto: AddProductImageDto,
+    ) {
+        return this.productImagesService.add(id, dto);
+    }
+
+    @Patch(':id/images/reorder')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    reorderImages(
+        @Param('id', ParseUUIDPipe) id: string,
+        @Body() dto: ReorderProductImagesDto,
+    ) {
+        return this.productImagesService.reorder(id, dto);
+    }
+
+    @Patch(':id/images/:imageId')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    updateImage(
+        @Param('id', ParseUUIDPipe) id: string,
+        @Param('imageId', ParseUUIDPipe) imageId: string,
+        @Body() dto: UpdateProductImageDto,
+    ) {
+        return this.productImagesService.update(id, imageId, dto);
+    }
+
+    @Patch(':id/images/:imageId/primary')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    setPrimary(
+        @Param('id', ParseUUIDPipe) id: string,
+        @Param('imageId', ParseUUIDPipe) imageId: string,
+    ) {
+        return this.productImagesService.setPrimary(id, imageId);
+    }
+
+    @Delete(':id/images/:imageId')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    removeImage(
+        @Param('id', ParseUUIDPipe) id: string,
+        @Param('imageId', ParseUUIDPipe) imageId: string,
+    ) {
+        return this.productImagesService.remove(id, imageId);
     }
 }

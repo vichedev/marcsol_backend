@@ -1,5 +1,6 @@
 export default () => ({
-    nodeEnv: process.env.NODE_ENV,
+    nodeEnv: process.env.NODE_ENV ?? 'development',
+    isProduction: process.env.NODE_ENV === 'production',
     port: parseInt(process.env.PORT ?? '3000', 10),
     apiPrefix: process.env.API_PREFIX ?? 'api/v1',
 
@@ -18,12 +19,30 @@ export default () => ({
         expiresIn: process.env.JWT_EXPIRES_IN ?? '1d',
     },
 
+    cookie: {
+        name: process.env.COOKIE_NAME ?? 'ws_session',
+        secure: process.env.COOKIE_SECURE === 'true',
+        sameSite: (process.env.COOKIE_SAMESITE ?? 'lax') as
+            | 'lax'
+            | 'strict'
+            | 'none',
+        domain: process.env.COOKIE_DOMAIN || undefined,
+    },
+
     cors: {
-        origin: process.env.CORS_ORIGIN,
+        origin: (process.env.CORS_ORIGIN ?? '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean),
     },
 
     bcrypt: {
-        saltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS ?? '10', 10),
+        saltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS ?? '12', 10),
+    },
+
+    throttle: {
+        ttl: parseInt(process.env.THROTTLE_TTL_MS ?? '60000', 10),
+        limit: parseInt(process.env.THROTTLE_LIMIT ?? '120', 10),
     },
 
     seed: {

@@ -6,6 +6,12 @@ import {
     UpdateDateColumn,
 } from 'typeorm';
 
+export enum PromotionLayout {
+    CINEMATIC = 'CINEMATIC',
+    BILLBOARD = 'BILLBOARD',
+    SPOTLIGHT = 'SPOTLIGHT',
+}
+
 @Entity('promotions')
 export class Promotion {
     @PrimaryGeneratedColumn('uuid')
@@ -31,6 +37,13 @@ export class Promotion {
 
     @Column({ default: 0 })
     displayOrder: number;
+
+    @Column({
+        type: 'enum',
+        enum: PromotionLayout,
+        default: PromotionLayout.CINEMATIC,
+    })
+    layout: PromotionLayout;
 
     @Column({ type: 'timestamp', nullable: true })
     startDate: Date;

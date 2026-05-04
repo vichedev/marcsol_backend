@@ -5,9 +5,18 @@ import {
     CreateDateColumn,
     UpdateDateColumn,
     ManyToOne,
+    OneToMany,
     JoinColumn,
 } from 'typeorm';
 import { Category } from '../../categories/entities/category.entity';
+import { ProductImage } from './product-image.entity';
+
+export enum ProductStatus {
+    DRAFT = 'DRAFT',
+    SCHEDULED = 'SCHEDULED',
+    PUBLISHED = 'PUBLISHED',
+    ARCHIVED = 'ARCHIVED',
+}
 
 @Entity('products')
 export class Product {
@@ -26,6 +35,7 @@ export class Product {
     @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
     price: number;
 
+    /** Caché de la imagen primaria de la galería (denormalizada para el storefront). */
     @Column()
     imageUrl: string;
 
@@ -34,6 +44,17 @@ export class Product {
 
     @Column({ default: false })
     isFeatured: boolean;
+
+    @Column({
+        type: 'enum',
+        enum: ProductStatus,
+        default: ProductStatus.PUBLISHED,
+    })
+    status: ProductStatus;
+
+    /** Si status = SCHEDULED, fecha en que pasa automáticamente a PUBLISHED. */
+    @Column({ type: 'timestamp', nullable: true })
+    scheduledAt: Date | null;
 
     @ManyToOne(() => Category, (category) => category.products, {
         nullable: true,
@@ -44,6 +65,11 @@ export class Product {
 
     @Column({ nullable: true })
     categoryId: string;
+
+    @OneToMany(() => ProductImage, (image) => image.product, {
+        cascade: ['insert', 'update'],
+    })
+    images: ProductImage[];
 
     @CreateDateColumn()
     createdAt: Date;

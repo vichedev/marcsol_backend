@@ -12,6 +12,7 @@ import {
 import { AdvertisementsService } from './advertisements.service';
 import { CreateAdvertisementDto } from './dto/create-advertisement.dto';
 import { UpdateAdvertisementDto } from './dto/update-advertisement.dto';
+import { ReorderDto } from '../common/dto/reorder.dto';
 import { AdPosition } from './entities/advertisement.entity';
 import { Public } from '../auth/decorators/public.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -33,6 +34,12 @@ export class AdvertisementsController {
     @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
     findAllAdmin() {
         return this.adsService.findAllAdmin();
+    }
+
+    @Patch('reorder')
+    @Roles(UserRole.SUPER_ADMIN, UserRole.ADMIN)
+    reorder(@Body() dto: ReorderDto) {
+        return this.adsService.reorder(dto);
     }
 
     @Get(':id')

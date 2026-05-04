@@ -271,7 +271,16 @@ export class ProductsImportService {
             normalizedImageMap.set(key.toLowerCase().trim(), value);
         }
 
-        const rows: Array<{ rowNum: number; data: any }> = [];
+        interface ImportRowData {
+            name: string;
+            description: string;
+            price: number | null;
+            categoryId: string;
+            isFeatured: boolean;
+            isActive: boolean;
+            imageUrl?: string;
+        }
+        const rows: Array<{ rowNum: number; data: ImportRowData }> = [];
         const errors: ImportRowError[] = [];
 
         sheet.eachRow((row, rowNum) => {
@@ -366,13 +375,23 @@ export class ProductsImportService {
         let created = 0;
         for (const { rowNum, data } of rows) {
             try {
-                await this.productsService.create(data);
+                await this.productsService.create({
+                    name: data.name,
+                    description: data.description,
+                    price: data.price ?? undefined,
+                    categoryId: data.categoryId,
+                    isFeatured: data.isFeatured,
+                    isActive: data.isActive,
+                    imageUrl: data.imageUrl ?? '',
+                });
                 created++;
-            } catch (err: any) {
+            } catch (err) {
+                const message =
+                    err instanceof Error ? err.message : 'Error al crear el producto';
                 errors.push({
                     row: rowNum,
                     name: data.name,
-                    errors: [err.message || 'Error al crear el producto'],
+                    errors: [message],
                 });
             }
         }
@@ -393,14 +412,17 @@ export class ProductsImportService {
         if (typeof val === 'string') return val.trim();
         if (typeof val === 'number') return String(val);
         if (typeof val === 'boolean') return val ? 'SI' : 'NO';
-        if (typeof val === 'object' && 'text' in val) {
-            return String((val as any).text).trim();
-        }
-        if (typeof val === 'object' && 'richText' in val) {
-            return ((val as any).richText as any[])
-                .map((rt) => rt.text)
-                .join('')
-                .trim();
+        if (typeof val === 'object') {
+            if ('text' in val && val.text !== undefined) {
+                return String((val as { text: unknown }).text).trim();
+            }
+            if ('richText' in val) {
+                const rich = (val as { richText: Array<{ text?: string }> }).richText;
+                return rich
+                    .map((rt) => rt.text ?? '')
+                    .join('')
+                    .trim();
+            }
         }
         return String(val).trim();
     }
