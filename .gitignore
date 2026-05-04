@@ -45,7 +45,7 @@ lerna-debug.log*
 .env.local
 
 # Local uploads (user-generated content; never commit)
-uploads/
+# uploads/
 dist/
 
 # temp directory
