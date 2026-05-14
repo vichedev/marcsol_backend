@@ -1,0 +1,41 @@
+# Lo que NO debe entrar al build context (más rápido + más seguro)
+
+# Dependencias y builds locales (se regeneran en la imagen)
+node_modules
+dist
+build
+coverage
+
+# Datos del usuario y secretos
+uploads/*
+!uploads/.gitkeep
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Git y CI
+.git
+.gitignore
+.gitattributes
+.github
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Docs y scripts no necesarios en runtime
+README.md
+*.md
+test
+e2e
+
+# El propio Dockerfile y compose (no aportan a la imagen)
+Dockerfile
+docker-compose*.yml
+Caddyfile
+deploy.sh
+install.sh
+deploy/

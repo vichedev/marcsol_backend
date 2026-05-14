@@ -1,5 +1,20 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Web Dinámica — docker-compose
+# ─────────────────────────────────────────────────────────────────────────
+# Tres servicios en una red interna:
+#   • db     → Postgres (datos persistidos en volumen named)
+#   • api    → NestJS (sirve API + SPA del front en public/)
+#   • caddy  → Reverse proxy + TLS automático Let's Encrypt
+#
+# Solo Caddy publica puertos al host (80/443). El api expone su 3000 sólo
+# en la red interna; nadie llega directo desde internet.
+#
+# Uso: ./deploy.sh full   (la primera vez)
+#      ./deploy.sh up     (siguientes arranques)
+# ─────────────────────────────────────────────────────────────────────────
+
 services:
-  postgres:
+  db:
     image: postgres:16-alpine
     container_name: web_dinamica_db
     restart: unless-stopped
@@ -7,10 +22,55 @@ services:
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_DATABASE}
-    ports:
-      - "${DB_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: web_dinamica_api:latest
+    container_name: web_dinamica_api
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    environment:
+      # Forzamos el host de la DB al nombre del servicio interno
+      DB_HOST: db
+      DB_PORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Las imágenes subidas persisten en el host (sobreviven recreaciones)
+      - ./uploads:/app/uploads
+    expose:
+      - "3000"
+    # NO se publica al host: solo Caddy lo alcanza por red interna
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: web_dinamica_caddy
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # certs TLS persistentes
+      - caddy_config:/config       # estado interno de Caddy
+    depends_on:
+      api:
+        condition: service_started
 
 volumes:
   postgres_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Web Dinámica — Caddyfile
+# ─────────────────────────────────────────────────────────────────────────
+# Caddy corre en un contenedor docker-compose. La variable SITE_ADDRESS
+# viene del .env.production que docker-compose pasa al contenedor.
+# Caddy obtiene/renueva el cert TLS de Let's Encrypt automáticamente.
+#
+# El backend (servicio 'api' en la misma red) sirve la SPA en /, /api/v1
+# y /static dentro del mismo origen. Caddy solo pasa todo tal cual.
+# ─────────────────────────────────────────────────────────────────────────
+
+{$SITE_ADDRESS} {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    request_body {
+        max_size 10MB
+    }
+
+    reverse_proxy api:3000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}
