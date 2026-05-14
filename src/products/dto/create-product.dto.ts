@@ -1,5 +1,7 @@
 import {
     IsBoolean,
+    IsDateString,
+    IsEnum,
     IsNotEmpty,
     IsNumber,
     IsOptional,
@@ -7,8 +9,10 @@ import {
     IsUUID,
     MaxLength,
     Min,
+    ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { ProductStatus } from '../entities/product.entity';
 
 export class CreateProductDto {
     @IsString()
@@ -41,4 +45,13 @@ export class CreateProductDto {
     @IsOptional()
     @IsUUID()
     categoryId?: string;
+
+    @IsOptional()
+    @IsEnum(ProductStatus)
+    status?: ProductStatus;
+
+    @IsOptional()
+    @ValidateIf((_, value) => value !== null)
+    @IsDateString()
+    scheduledAt?: string | null;
 }

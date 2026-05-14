@@ -62,7 +62,9 @@ import { SeedsModule } from './database/seeds/seeds.module';
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const corsOrigins = config.get<string[]>('cors.origin') ?? [];
+        const apiPrefix = config.get<string>('apiPrefix') ?? 'api/v1';
         return [
+          // 1) Uploads de imágenes (cache largo, son archivos con UUID)
           {
             rootPath: join(
               process.cwd(),
@@ -70,9 +72,6 @@ import { SeedsModule } from './database/seeds/seeds.module';
             ),
             serveRoot: '/static',
             serveStaticOptions: {
-              // Cabeceras seguras para los assets servidos desde /static:
-              // - Solo permitimos los orígenes configurados (no *)
-              // - Forzamos no-sniff y un cache razonable
               setHeaders: (res: ServerResponse, _path: string) => {
                 res.setHeader('X-Content-Type-Options', 'nosniff');
                 res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
@@ -81,8 +80,25 @@ import { SeedsModule } from './database/seeds/seeds.module';
                   res.setHeader('Access-Control-Allow-Origin', corsOrigins[0]);
                   res.setHeader('Vary', 'Origin');
                 }
-                // Si hay varios orígenes, dejamos que el middleware CORS de Express
-                // (heredado vía main.ts) decida; no fijamos `*` para no relajar.
+              },
+            },
+          },
+          // 2) SPA del frontend: el build de Vite se copia a ./public en deploy.
+          //    Sirve index.html como fallback para rutas del router cliente.
+          {
+            rootPath: join(process.cwd(), 'public'),
+            serveRoot: '/',
+            exclude: [`/${apiPrefix}/(.*)`, '/static/(.*)'],
+            serveStaticOptions: {
+              index: ['index.html'],
+              setHeaders: (res: ServerResponse, path: string) => {
+                if (path.endsWith('index.html')) {
+                  // El HTML debe revalidarse para que los despliegues se vean al
+                  // siguiente refresh; los assets JS/CSS llevan hash en el nombre.
+                  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+                } else {
+                  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+                }
               },
             },
           },
