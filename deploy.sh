@@ -29,8 +29,10 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR"
 
 ENV_FILE=".env.production"
-COMPOSE_PROJECT_NAME="web_dinamica"
-export COMPOSE_PROJECT_NAME
+
+# NO forzamos COMPOSE_PROJECT_NAME: compose usa el nombre del directorio.
+# Eso preserva el volumen postgres_data existente cuando el directorio se
+# llama igual que antes (p.ej. marcsol_backend → marcsol_backend_postgres_data).
 
 DC() { docker compose --env-file "$ENV_FILE" "$@"; }
 
@@ -159,8 +161,11 @@ cmd_status() {
     require_docker
     DC ps
     echo ""
-    info "Volúmenes:"
-    docker volume ls --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" --format "table {{.Name}}\t{{.Driver}}"
+    info "Volúmenes del proyecto:"
+    local proj
+    proj=$(DC config --format json 2>/dev/null | grep -oE '"name":"[^"]+"' | head -1 | cut -d'"' -f4 || echo "")
+    [[ -z "$proj" ]] && proj=$(basename "$PROJECT_DIR")
+    docker volume ls --filter "label=com.docker.compose.project=$proj" --format "table {{.Name}}\t{{.Driver}}"
 }
 
 cmd_logs() {
