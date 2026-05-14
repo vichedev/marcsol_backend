@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────
-# Web Dinámica — Instalador de producción
+# Web Dinámica — Instalador de producción (todo-en-uno)
 # ─────────────────────────────────────────────────────────────────────────
-# Despliega backend (NestJS) + frontend (Vite) en un único host. El backend
-# sirve la API en /api/v1 y la SPA del frontend desde /. Postgres corre en
-# Docker (con docker-compose.yml) si Docker está disponible; si no, asume
-# Postgres instalado localmente.
+# Desde cero, en un solo comando, deja funcionando en https://TU_DOMINIO:
+#   • Postgres en Docker
+#   • Backend NestJS (systemd) sirviendo API + SPA del front (carpeta public/)
+#   • Caddy reverse proxy con TLS automático (Let's Encrypt)
+#   • Firewall ufw abierto en 80/443 (si está activo)
+#
+# Auto-instala lo que falte (Node 20, Docker, Caddy, openssl, curl).
+# Idempotente: lo puedes correr varias veces sin romper nada.
 #
 # Uso:
-#   ./install.sh              # instalación interactiva (auto-instala lo que falte)
-#   ./install.sh --no-prompt  # usa valores de .env si existe, sin preguntar
-#   ./install.sh --reset-env  # regenera .env desde cero
-#   ./install.sh --no-install # NO instala dependencias del sistema (falla si faltan)
-#
-# El instalador auto-detecta el gestor de paquetes (apt/dnf/yum/apk) y
-# auto-instala lo que falte: Node 20 (NodeSource), Docker, openssl, curl.
-# Requiere root o sudo para instalar paquetes del sistema.
+#   ./install.sh                   # interactivo, despliegue completo con TLS
+#   ./install.sh --reset-env       # regenera .env desde cero
+#   ./install.sh --no-tls          # sin Caddy (NO recomendado: el bundle del
+#                                  #   front trae URLs https:// horneadas)
+#   ./install.sh --no-install      # falla si falta algún paquete (no instala)
+#   ./install.sh --no-prompt       # usa defaults / .env existente, sin preguntar
 # ─────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-# ── Colores y logging ────────────────────────────────────────────────────
+# ── Colores ──────────────────────────────────────────────────────────────
 if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null || echo 0) -ge 8 ]]; then
     RED=$(tput setaf 1); GREEN=$(tput setaf 2); YELLOW=$(tput setaf 3)
     BLUE=$(tput setaf 4); CYAN=$(tput setaf 6); BOLD=$(tput bold); NC=$(tput sgr0)
@@ -35,25 +37,27 @@ log_err()  { printf "${RED}✗${NC}  %s\n" "$*" >&2; }
 step()     { printf "\n${BOLD}${CYAN}▸ %s${NC}\n" "$*"; }
 banner() {
     printf "\n${BOLD}${BLUE}"
-    printf '%.s═' {1..70}; printf "\n"
+    printf '═%.0s' {1..70}; printf "\n"
     printf "  WEB DINÁMICA — Instalador de producción\n"
-    printf '%.s═' {1..70}
+    printf '═%.0s' {1..70}
     printf "${NC}\n\n"
 }
 
 # ── Flags ────────────────────────────────────────────────────────────────
-NO_PROMPT=0
+USE_TLS=1
+AUTO_INSTALL=1
 RESET_ENV=0
-AUTO_INSTALL=1   # default: instala automáticamente lo que falte
+NO_PROMPT=0
 for arg in "$@"; do
     case "$arg" in
-        --no-prompt)  NO_PROMPT=1 ;;
-        --reset-env)  RESET_ENV=1 ;;
+        --no-tls)     USE_TLS=0 ;;
         --no-install) AUTO_INSTALL=0 ;;
+        --reset-env)  RESET_ENV=1 ;;
+        --no-prompt)  NO_PROMPT=1 ;;
         -h|--help)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            grep -E '^# ' "$0" | head -25 | sed 's/^# \?//'
             exit 0 ;;
-        *)  log_err "Argumento desconocido: $arg"; exit 1 ;;
+        *) log_err "Argumento desconocido: $arg"; exit 1 ;;
     esac
 done
 
@@ -63,203 +67,53 @@ BACK_DIR="$SCRIPT_DIR"
 ROOT_DIR="$(cd "$BACK_DIR/.." && pwd)"
 FRONT_DIR="$ROOT_DIR/front_web_dinamica_admin"
 BACK_ENV="$BACK_DIR/.env"
-BACK_ENV_TEMPLATE="$BACK_DIR/.env.production.example"
 FRONT_ENV_PROD="$FRONT_DIR/.env.production"
 PUBLIC_DIR="$BACK_DIR/public"
 
-# Detección: ¿el frontend ya está pre-compilado en public/ (committeado al
-# repo desde la máquina de dev)? Si index.html existe ahí, no recompilamos
-# ni necesitamos la carpeta del front.
 PREBUILT_FRONT=0
-if [[ -f "$PUBLIC_DIR/index.html" ]]; then
-    PREBUILT_FRONT=1
-fi
+[[ -f "$PUBLIC_DIR/index.html" ]] && PREBUILT_FRONT=1
 
 banner
 
-# ── 1. Verificar / auto-instalar dependencias del sistema ───────────────
-step "1/9  Verificando dependencias del sistema"
-
-check_cmd() {
-    if command -v "$1" >/dev/null 2>&1; then
-        local version
-        version=$("$1" --version 2>/dev/null | head -n1 || echo "")
-        log_ok "$1 disponible ${version:+($version)}"
-        return 0
-    fi
-    return 1
-}
-
-# Privilegios: si no soy root, intento sudo.
+# ── Privilegios y package manager ───────────────────────────────────────
 SUDO=""
 if [[ $EUID -ne 0 ]]; then
     if command -v sudo >/dev/null 2>&1; then
         SUDO="sudo"
     else
-        log_warn "No soy root y no hay sudo: no podré instalar paquetes faltantes."
-        AUTO_INSTALL=0
+        log_err "Necesitas ser root o tener 'sudo' instalado."
+        exit 1
     fi
 fi
 
-# Detectar gestor de paquetes
-PM=""
-PM_FAMILY=""
+PM=""; PM_FAMILY=""
 if   command -v apt-get >/dev/null 2>&1; then PM="apt-get"; PM_FAMILY="debian"
 elif command -v dnf     >/dev/null 2>&1; then PM="dnf";     PM_FAMILY="rhel"
 elif command -v yum     >/dev/null 2>&1; then PM="yum";     PM_FAMILY="rhel"
-elif command -v apk     >/dev/null 2>&1; then PM="apk";     PM_FAMILY="alpine"
+else
+    log_err "Distribución no soportada (necesito apt, dnf o yum)."
+    exit 1
 fi
 
 apt_updated=0
 apt_refresh() {
     [[ "$PM_FAMILY" != "debian" ]] && return 0
     [[ "$apt_updated" -eq 1 ]] && return 0
-    log_info "Actualizando índices de apt..."
-    $SUDO apt-get update -qq
-    apt_updated=1
+    $SUDO apt-get update -qq && apt_updated=1
 }
 
 pkg_install() {
-    # pkg_install <paquete> [paquete...]
     case "$PM_FAMILY" in
         debian) apt_refresh; $SUDO apt-get install -y --no-install-recommends "$@" ;;
         rhel)   $SUDO "$PM" install -y "$@" ;;
-        alpine) $SUDO apk add --no-cache "$@" ;;
-        *)      log_err "Distribución no soportada para auto-instalación"; return 1 ;;
     esac
 }
 
-ensure_curl() {
-    check_cmd curl >/dev/null 2>&1 && return 0
-    [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "curl no encontrado"; return 1; }
-    log_info "Instalando curl..."
-    pkg_install curl ca-certificates
-}
-
-ensure_openssl() {
-    check_cmd openssl >/dev/null 2>&1 && return 0
-    [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "openssl no encontrado"; return 1; }
-    log_info "Instalando openssl..."
-    pkg_install openssl
-}
-
-ensure_node20() {
-    local need_install=0
-    if command -v node >/dev/null 2>&1; then
-        local major
-        major=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
-        if [[ "$major" -ge 20 ]]; then
-            log_ok "node disponible ($(node -v))"
-            command -v npm >/dev/null 2>&1 && log_ok "npm disponible ($(npm -v))" || need_install=1
-            [[ "$need_install" -eq 0 ]] && return 0
-        else
-            log_warn "Node detectado pero versión $major < 20; se reemplazará"
-            need_install=1
-        fi
-    else
-        need_install=1
-    fi
-
-    [[ "$AUTO_INSTALL" -eq 0 ]] && {
-        log_err "Se requiere Node 20+. Instala con NodeSource y reintenta."
-        return 1
-    }
-
-    ensure_curl || return 1
-
-    case "$PM_FAMILY" in
-        debian)
-            log_info "Instalando Node 20 LTS (NodeSource)..."
-            pkg_install gnupg
-            curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
-            pkg_install nodejs
-            ;;
-        rhel)
-            log_info "Instalando Node 20 LTS (NodeSource)..."
-            curl -fsSL https://rpm.nodesource.com/setup_20.x | $SUDO bash -
-            $SUDO "$PM" install -y nodejs
-            ;;
-        alpine)
-            log_info "Instalando Node desde el repo de Alpine..."
-            pkg_install nodejs npm
-            ;;
-        *)
-            log_err "No sé instalar Node en esta distribución. Instálalo manualmente."
-            return 1
-            ;;
-    esac
-
-    if ! command -v node >/dev/null 2>&1; then
-        log_err "La instalación de Node falló"
-        return 1
-    fi
-    local major
-    major=$(node -p "process.versions.node.split('.')[0]")
-    if [[ "$major" -lt 20 ]]; then
-        log_err "Node instalado es v$major; se necesita 20+"
-        return 1
-    fi
-    log_ok "Node $(node -v) y npm $(npm -v) instalados"
-}
-
-ensure_docker() {
-    local need_install=0
-    if command -v docker >/dev/null 2>&1; then
-        if docker compose version >/dev/null 2>&1; then
-            log_ok "docker $(docker --version | awk '{print $3}' | tr -d ',')  +  docker compose disponible"
-            return 0
-        else
-            log_warn "Docker presente pero sin plugin 'compose'"
-            need_install=1
-        fi
-    else
-        need_install=1
-    fi
-
-    if [[ "$AUTO_INSTALL" -eq 0 ]]; then
-        log_warn "Docker no se instalará. Se asumirá Postgres externo."
-        return 1
-    fi
-
-    ensure_curl || return 1
-    log_info "Instalando Docker (script oficial get.docker.com)..."
-    curl -fsSL https://get.docker.com | $SUDO sh
-    if command -v systemctl >/dev/null 2>&1; then
-        $SUDO systemctl enable --now docker 2>/dev/null || true
-    fi
-    if ! docker compose version >/dev/null 2>&1; then
-        log_err "Docker se instaló pero 'docker compose' no responde"
-        return 1
-    fi
-    log_ok "Docker $(docker --version | awk '{print $3}' | tr -d ',') instalado"
-
-    # Si NO soy root, sumo al usuario al grupo docker (la sesión actual
-    # seguirá necesitando sudo hasta el siguiente login).
-    if [[ "$SUDO" == "sudo" ]] && id -nG | grep -qvw docker; then
-        log_info "Añadiendo $(id -un) al grupo docker (efectivo tras re-login)"
-        $SUDO usermod -aG docker "$(id -un)" || true
-    fi
-}
-
-# Ejecutar
-ensure_openssl
-ensure_curl
-ensure_node20
-
-USE_DOCKER=1
-if ! ensure_docker; then
-    USE_DOCKER=0
-fi
-
-# ── 2. Cargar/preguntar configuración ───────────────────────────────────
-step "2/9  Configuración de despliegue"
-
+# ── Helpers de prompts ──────────────────────────────────────────────────
 prompt() {
-    # prompt VAR "Etiqueta" "default"
     local __var="$1" __label="$2" __default="${3:-}" __input=""
     if [[ "$NO_PROMPT" -eq 1 ]]; then
-        printf -v "$__var" '%s' "$__default"
-        return
+        printf -v "$__var" '%s' "$__default"; return
     fi
     if [[ -n "$__default" ]]; then
         printf "  ${BOLD}%s${NC} [${CYAN}%s${NC}]: " "$__label" "$__default"
@@ -274,8 +128,7 @@ prompt() {
 prompt_secret() {
     local __var="$1" __label="$2" __default="${3:-}" __input=""
     if [[ "$NO_PROMPT" -eq 1 ]]; then
-        printf -v "$__var" '%s' "$__default"
-        return
+        printf -v "$__var" '%s' "$__default"; return
     fi
     printf "  ${BOLD}%s${NC} [enter = generar aleatorio]: " "$__label"
     read -rs __input || true
@@ -284,84 +137,136 @@ prompt_secret() {
     printf -v "$__var" '%s' "$__input"
 }
 
-# Si .env ya existe y no se pidió reset, reusarlo
-if [[ -f "$BACK_ENV" && "$RESET_ENV" -eq 0 ]]; then
-    log_info ".env existente detectado, se reutilizará."
-    log_info "Pasa --reset-env para regenerarlo."
-    # shellcheck disable=SC1090
-    set -a; source "$BACK_ENV"; set +a
-    DOMAIN="${DOMAIN:-}"
-    # Si no hay DOMAIN en el .env, sácalo de CORS_ORIGIN
-    if [[ -z "$DOMAIN" ]] && [[ -n "${CORS_ORIGIN:-}" ]]; then
-        DOMAIN="${CORS_ORIGIN%%,*}"
+# Helper para escribir variables al .env con quoting POSIX-seguro.
+write_env() {
+    local n="$1" v="$2"
+    v="${v//\'/\'\\\'\'}"
+    printf "%s='%s'\n" "$n" "$v" >> "$BACK_ENV"
+}
+
+# ═════════════════════════════════════════════════════════════════════════
+# 1) DEPENDENCIAS DEL SISTEMA
+# ═════════════════════════════════════════════════════════════════════════
+step "1/9  Dependencias del sistema"
+
+ensure_simple_pkg() {
+    # ensure_simple_pkg <cmd> <pkg-debian> [<pkg-rhel>]
+    local cmd="$1" pkg_deb="$2" pkg_rhel="${3:-$2}"
+    if command -v "$cmd" >/dev/null 2>&1; then
+        log_ok "$cmd disponible"
+        return 0
     fi
+    [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "Falta $cmd"; exit 1; }
+    log_info "Instalando $cmd..."
+    case "$PM_FAMILY" in
+        debian) pkg_install "$pkg_deb" ;;
+        rhel)   pkg_install "$pkg_rhel" ;;
+    esac
+    log_ok "$cmd instalado"
+}
+
+ensure_simple_pkg curl    curl
+ensure_simple_pkg openssl openssl
+
+# Node 20 LTS vía NodeSource
+need_node=0
+if ! command -v node >/dev/null 2>&1; then
+    need_node=1
 else
-    prompt DOMAIN          "Dominio público que ya apunta a este servidor (con https://)"  "https://marcsol-preview.casacam.net"
+    NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+    [[ "$NODE_MAJOR" -lt 20 ]] && need_node=1
+fi
 
-    # ¿URLs absolutas en el bundle del frontend?
-    # Por defecto NO: el back sirve el front en el mismo origen → paths
-    # relativos son más portables (el mismo dist funciona en cualquier dominio).
-    # Se omite si el frontend ya viene precompilado en public/.
-    if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
-        FRONT_ABSOLUTE="N"
-        log_info "Frontend precompilado detectado en public/ → no se recompilará"
-    else
-        prompt FRONT_ABSOLUTE  "¿Hornear el dominio en el bundle del front? (y/N)"   "N"
+if [[ "$need_node" -eq 1 ]]; then
+    [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "Falta Node 20+"; exit 1; }
+    log_info "Instalando Node 20 LTS (NodeSource)..."
+    case "$PM_FAMILY" in
+        debian)
+            pkg_install ca-certificates gnupg
+            curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+            pkg_install nodejs
+            ;;
+        rhel)
+            curl -fsSL https://rpm.nodesource.com/setup_20.x | $SUDO bash -
+            $SUDO "$PM" install -y nodejs
+            ;;
+    esac
+fi
+log_ok "node $(node -v) / npm $(npm -v)"
+
+# Docker + compose
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+    [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "Falta Docker + compose"; exit 1; }
+    log_info "Instalando Docker (script oficial get.docker.com)..."
+    curl -fsSL https://get.docker.com | $SUDO sh
+    command -v systemctl >/dev/null 2>&1 && $SUDO systemctl enable --now docker 2>/dev/null || true
+fi
+log_ok "docker $(docker --version | awk '{print $3}' | tr -d ',')"
+
+# Caddy (solo si vamos a usar TLS)
+if [[ "$USE_TLS" -eq 1 ]]; then
+    if ! command -v caddy >/dev/null 2>&1; then
+        [[ "$AUTO_INSTALL" -eq 0 ]] && { log_err "Falta Caddy"; exit 1; }
+        log_info "Instalando Caddy (repo oficial Cloudsmith)..."
+        case "$PM_FAMILY" in
+            debian)
+                pkg_install debian-keyring debian-archive-keyring apt-transport-https
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                    | $SUDO gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+                    | $SUDO tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+                apt_updated=0; apt_refresh
+                pkg_install caddy
+                ;;
+            rhel)
+                $SUDO "$PM" install -y 'dnf-command(copr)' || true
+                $SUDO "$PM" copr enable -y @caddy/caddy
+                $SUDO "$PM" install -y caddy
+                ;;
+        esac
     fi
+    log_ok "caddy $(caddy version 2>/dev/null | awk '{print $1}')"
+fi
 
-    prompt DB_HOST         "DB host"                          "localhost"
-    prompt DB_PORT         "DB port"                          "5432"
-    prompt DB_USERNAME     "DB usuario"                       "postgres"
-    prompt_secret DB_PASSWORD "DB password"                   "$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
-    prompt DB_DATABASE     "DB nombre"                        "web_dinamica"
+# ═════════════════════════════════════════════════════════════════════════
+# 2) CONFIGURACIÓN (.env)
+# ═════════════════════════════════════════════════════════════════════════
+step "2/9  Configuración"
 
-    prompt SEED_ADMIN_EMAIL "Email del super admin"           "admin@${DOMAIN#https://}"
-    SEED_ADMIN_EMAIL="${SEED_ADMIN_EMAIL#admin@www.}"
+if [[ -f "$BACK_ENV" && "$RESET_ENV" -eq 0 ]]; then
+    log_info ".env existente, se reutiliza (--reset-env para regenerar)"
+    set -a; source "$BACK_ENV"; set +a
+    DOMAIN="${DOMAIN:-${CORS_ORIGIN%%,*}}"
+else
+    prompt DOMAIN "Dominio público (con https://)" "https://marcsol-preview.casacam.net"
+    DOMAIN_HOST="${DOMAIN#https://}"; DOMAIN_HOST="${DOMAIN_HOST#http://}"; DOMAIN_HOST="${DOMAIN_HOST%%/*}"
+
+    prompt DB_HOST     "DB host"     "localhost"
+    prompt DB_PORT     "DB port"     "5432"
+    prompt DB_USERNAME "DB usuario"  "postgres"
+    prompt_secret DB_PASSWORD "DB password" "$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
+    prompt DB_DATABASE "DB nombre"   "web_dinamica"
+
+    prompt        SEED_ADMIN_EMAIL    "Email del super admin"    "admin@${DOMAIN_HOST}"
     prompt_secret SEED_ADMIN_PASSWORD "Password del super admin" "$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-18)"
-    prompt SEED_ADMIN_NAME "Nombre del super admin"           "Super Admin"
+    SEED_ADMIN_NAME="Super Admin"
 
-    prompt PORT            "Puerto donde escucha el backend"  "3000"
-
-    # Secretos automáticos
-    JWT_SECRET="$(openssl rand -hex 32)"   # 64 chars hex → cumple min 48
-    log_ok "JWT_SECRET generado (64 chars)"
-
-    # Cookie domain a partir del dominio
-    COOKIE_HOST="${DOMAIN#https://}"; COOKIE_HOST="${COOKIE_HOST#http://}"; COOKIE_HOST="${COOKIE_HOST%%/*}"
-    COOKIE_DOMAIN_DEFAULT=""
-    if [[ "$COOKIE_HOST" =~ \. ]]; then
-        # Para hostnames como app.midominio.com, dejamos vacío y la cookie queda atada al host.
-        COOKIE_DOMAIN_DEFAULT=""
-    fi
-
-    # Generar .env de forma segura: TODO valor va entre comillas simples,
-    # escapando comillas simples literales al estilo POSIX (' -> '\'').
-    # Así `bash source .env` no rompe con espacios ni con caracteres como $.
-    log_info "Generando $BACK_ENV ..."
-    umask 077
-
-    write_env() {
-        # write_env NAME VALUE
-        local n="$1" v="$2"
-        v="${v//\'/\'\\\'\'}"
-        printf "%s='%s'\n" "$n" "$v" >> "$BACK_ENV"
-    }
+    PORT="3000"
+    JWT_SECRET="$(openssl rand -hex 32)"
 
     COOKIE_SECURE_VAL="false"
-    [[ "$DOMAIN" == https://* ]] && COOKIE_SECURE_VAL="true"
+    [[ "$USE_TLS" -eq 1 && "$DOMAIN" == https://* ]] && COOKIE_SECURE_VAL="true"
 
+    umask 077
     : > "$BACK_ENV"
     {
-        echo "# Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-        echo "# Edita con cuidado. No comitear este archivo."
+        echo "# Generado por install.sh — $(date -u +%FT%TZ)"
+        echo "# NO comitear este archivo."
         echo ""
     } >> "$BACK_ENV"
-
     write_env NODE_ENV          "production"
     write_env PORT              "$PORT"
     write_env API_PREFIX        "api/v1"
-    echo "" >> "$BACK_ENV"
-
     write_env DB_HOST           "$DB_HOST"
     write_env DB_PORT           "$DB_PORT"
     write_env DB_USERNAME       "$DB_USERNAME"
@@ -369,135 +274,78 @@ else
     write_env DB_DATABASE       "$DB_DATABASE"
     write_env DB_SYNCHRONIZE    "false"
     write_env DB_LOGGING        "false"
-    echo "" >> "$BACK_ENV"
-
     write_env JWT_SECRET        "$JWT_SECRET"
     write_env JWT_EXPIRES_IN    "1d"
-    echo "" >> "$BACK_ENV"
-
     write_env COOKIE_NAME       "ws_session"
     write_env COOKIE_SECURE     "$COOKIE_SECURE_VAL"
     write_env COOKIE_SAMESITE   "lax"
-    write_env COOKIE_DOMAIN     "$COOKIE_DOMAIN_DEFAULT"
-    echo "" >> "$BACK_ENV"
-
+    write_env COOKIE_DOMAIN     ""
     write_env CORS_ORIGIN       "$DOMAIN"
     write_env BCRYPT_SALT_ROUNDS "12"
     write_env THROTTLE_TTL_MS   "60000"
     write_env THROTTLE_LIMIT    "120"
-    echo "" >> "$BACK_ENV"
-
     write_env SEED_ADMIN_EMAIL    "$SEED_ADMIN_EMAIL"
     write_env SEED_ADMIN_PASSWORD "$SEED_ADMIN_PASSWORD"
     write_env SEED_ADMIN_NAME     "$SEED_ADMIN_NAME"
-    echo "" >> "$BACK_ENV"
-
     write_env UPLOAD_DEST       "./uploads"
     write_env UPLOAD_MAX_SIZE   "5242880"
-    echo "" >> "$BACK_ENV"
-
-    echo "# Memo del instalador (no la lee Nest)" >> "$BACK_ENV"
     write_env DOMAIN            "$DOMAIN"
-
     chmod 600 "$BACK_ENV"
-    log_ok "$BACK_ENV creado (permisos 600)"
+    log_ok ".env generado (permisos 600)"
 fi
 
-# Validar que tenemos lo necesario para continuar
-: "${DOMAIN:?Falta DOMAIN}"
-: "${DB_PASSWORD:?Falta DB_PASSWORD}"
+# Defaults por si vienen del .env existente
+: "${PORT:=3000}"
+: "${DOMAIN:?Falta DOMAIN en .env}"
+DOMAIN_HOST="${DOMAIN#https://}"; DOMAIN_HOST="${DOMAIN_HOST#http://}"; DOMAIN_HOST="${DOMAIN_HOST%%/*}"
 
-# ── 3. Levantar Postgres (Docker) ───────────────────────────────────────
-step "3/9  Base de datos"
-
-if [[ "$USE_DOCKER" -eq 1 ]]; then
-    log_info "Levantando contenedor de Postgres con docker compose..."
-    # shellcheck disable=SC1090
-    set -a; source "$BACK_ENV"; set +a
-    (cd "$BACK_DIR" && docker compose up -d) || (cd "$BACK_DIR" && docker-compose up -d)
-    # Espera a que Postgres acepte conexiones
-    log_info "Esperando a Postgres..."
-    for i in {1..30}; do
-        if docker exec web_dinamica_db pg_isready -U "$DB_USERNAME" -d "$DB_DATABASE" >/dev/null 2>&1; then
-            log_ok "Postgres responde"
-            break
-        fi
-        sleep 1
-        [[ "$i" -eq 30 ]] && { log_err "Postgres no respondió en 30s"; exit 1; }
-    done
-else
-    log_warn "Asegúrate de que Postgres corre en $DB_HOST:$DB_PORT con DB \"$DB_DATABASE\"."
-fi
-
-# ── 4. Backend: dependencias + build ────────────────────────────────────
-step "4/9  Backend — instalando dependencias"
+# ═════════════════════════════════════════════════════════════════════════
+# 3) POSTGRES (Docker)
+# ═════════════════════════════════════════════════════════════════════════
+step "3/9  Postgres en Docker"
 
 cd "$BACK_DIR"
-# IMPORTANTE: forzamos --include=dev porque .env tiene NODE_ENV=production y
-# eso haría que npm omita devDependencies (que es donde está @nestjs/cli con
-# el comando 'nest' que necesitamos para compilar).
+set -a; source "$BACK_ENV"; set +a
+$SUDO docker compose up -d
+log_info "Esperando a Postgres..."
+for i in {1..30}; do
+    if $SUDO docker exec web_dinamica_db pg_isready -U "$DB_USERNAME" -d "$DB_DATABASE" >/dev/null 2>&1; then
+        log_ok "Postgres responde"
+        break
+    fi
+    sleep 1
+    [[ "$i" -eq 30 ]] && { log_err "Postgres no respondió en 30s"; exit 1; }
+done
+
+# ═════════════════════════════════════════════════════════════════════════
+# 4) BACKEND — build
+# ═════════════════════════════════════════════════════════════════════════
+step "4/9  Backend — build"
+
+cd "$BACK_DIR"
+# IMPORTANTE: --include=dev fuerza devDeps (nest CLI, ts-node) aunque
+# NODE_ENV=production esté seteado por el source de .env.
 if [[ -f package-lock.json ]]; then
     npm ci --no-audit --no-fund --include=dev
 else
     npm install --no-audit --no-fund --include=dev
 fi
-log_ok "Dependencias del backend instaladas (con devDependencies)"
-
-step "5/9  Backend — compilando"
 npm run build
-log_ok "Backend compilado en dist/"
+log_ok "Backend compilado"
 
-# ── 5. Frontend ─────────────────────────────────────────────────────────
-# Hay tres escenarios posibles:
-#   A) public/ ya trae el build (committeado desde la máquina de dev):
-#      no se hace nada — el dominio ya está horneado, listo para servir.
-#   B) No hay build en public/ pero SÍ está la carpeta del front al lado:
-#      se compila aquí (vite build) y se copia a public/.
-#   C) No hay build ni carpeta del front: error fatal.
-step "6/9  Frontend — preparando bundle"
+# ═════════════════════════════════════════════════════════════════════════
+# 5) FRONTEND — usar precompilado o compilar
+# ═════════════════════════════════════════════════════════════════════════
+step "5/9  Frontend"
 
 if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
-    log_ok "Frontend ya compilado en $PUBLIC_DIR (build pre-horneado desde el repo)"
-    log_info "Se omiten 'npm install' y 'vite build' del frontend."
+    log_ok "Build pre-horneado detectado en public/ → no recompilo"
 elif [[ -d "$FRONT_DIR" ]]; then
-    log_info "Build no encontrado en public/, compilando el frontend desde $FRONT_DIR"
-
-    # Decidir si el bundle del front lleva URLs absolutas o relativas.
-    FRONT_ABS_FLAG="${FRONT_ABSOLUTE:-N}"
-    FRONT_ABS_FLAG="$(printf '%s' "$FRONT_ABS_FLAG" | tr '[:upper:]' '[:lower:]')"
-
-    # Backup de claves de EmailJS si ya estaban en .env.production
-    EMAILJS_PUB=""; EMAILJS_SVC=""; EMAILJS_T1=""; EMAILJS_T2=""; ADMIN_EMAIL_FRONT=""
-    if [[ -f "$FRONT_ENV_PROD" ]]; then
-        EMAILJS_PUB=$(grep -E '^VITE_EMAILJS_PUBLIC_KEY=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-        EMAILJS_SVC=$(grep -E '^VITE_EMAILJS_SERVICE_ID=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-        EMAILJS_T1=$(grep -E '^VITE_EMAILJS_TEMPLATE_CONTACT=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-        EMAILJS_T2=$(grep -E '^VITE_EMAILJS_TEMPLATE_SUBSCRIBE=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-        ADMIN_EMAIL_FRONT=$(grep -E '^VITE_ADMIN_EMAIL=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-    fi
-
-    if [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]]; then
-        log_info "Hornearé el dominio en el bundle: $DOMAIN"
-        VITE_API_URL_VAL="${DOMAIN%/}/api/v1"
-        VITE_STATIC_URL_VAL="${DOMAIN%/}"
-    else
-        log_info "Bundle con paths relativos (mismo origen, portable)"
-        VITE_API_URL_VAL="/api/v1"
-        VITE_STATIC_URL_VAL=""
-    fi
-
+    log_info "Compilando frontend con dominio horneado: $DOMAIN"
     cat > "$FRONT_ENV_PROD" <<EOF
-# Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# Modo: $( [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]] && echo "URLs absolutas (dominio horneado)" || echo "paths relativos (mismo origen)" )
-VITE_API_URL=$VITE_API_URL_VAL
-VITE_STATIC_URL=$VITE_STATIC_URL_VAL
-VITE_EMAILJS_PUBLIC_KEY=$EMAILJS_PUB
-VITE_EMAILJS_SERVICE_ID=$EMAILJS_SVC
-VITE_EMAILJS_TEMPLATE_CONTACT=$EMAILJS_T1
-VITE_EMAILJS_TEMPLATE_SUBSCRIBE=$EMAILJS_T2
-VITE_ADMIN_EMAIL=$ADMIN_EMAIL_FRONT
+VITE_API_URL=$DOMAIN/api/v1
+VITE_STATIC_URL=$DOMAIN
 EOF
-
     cd "$FRONT_DIR"
     if [[ -f package-lock.json ]]; then
         npm ci --no-audit --no-fund --include=dev
@@ -505,61 +353,39 @@ EOF
         npm install --no-audit --no-fund --include=dev
     fi
     npm run build
-    log_ok "Frontend compilado en $FRONT_DIR/dist/"
-
-    step "7/9  Copiando dist del frontend a $PUBLIC_DIR"
+    cd "$BACK_DIR"
     mkdir -p "$PUBLIC_DIR"
     find "$PUBLIC_DIR" -mindepth 1 -delete
     cp -R "$FRONT_DIR/dist/." "$PUBLIC_DIR/"
-    log_ok "Frontend copiado a $PUBLIC_DIR"
+    log_ok "Frontend compilado y copiado a public/"
 else
-    log_err "No hay build en $PUBLIC_DIR/index.html NI carpeta del front en $FRONT_DIR"
-    log_info "Opciones:"
-    log_info "  1) Compila el front en tu máquina de dev y commitea back/public/"
-    log_info "  2) Sube también la carpeta front_web_dinamica_admin junto al back"
+    log_err "No hay public/index.html ni carpeta del front en $FRONT_DIR"
+    log_info "Compila el front en tu máquina de dev y commitea back/public/"
     exit 1
 fi
 
-# Si llegamos con PREBUILT_FRONT=1, el step 7 nunca se imprime; lo logueamos
-# para no confundir al usuario sobre el conteo de pasos.
-if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
-    step "7/9  Copia del frontend"
-    log_ok "Omitida — el build ya está en $PUBLIC_DIR"
-fi
-
-# ── 7. Migraciones + seed del admin ─────────────────────────────────────
-step "8/9  Migraciones y seed del primer admin"
+# ═════════════════════════════════════════════════════════════════════════
+# 6) MIGRACIONES + SEED
+# ═════════════════════════════════════════════════════════════════════════
+step "6/9  Migraciones y seed del admin"
 
 cd "$BACK_DIR"
-# shellcheck disable=SC1090
 set -a; source "$BACK_ENV"; set +a
-
-log_info "Aplicando migraciones de TypeORM..."
 npm run migration:run
-log_ok "Migraciones aplicadas"
-
-log_info "Creando super admin (idempotente)..."
 npm run seed:admin
-log_ok "Seed ejecutado"
+log_ok "DB lista"
 
-# ── 8. Configurar servicio systemd (si está disponible) ─────────────────
-step "9/9  Servicio del sistema"
+# ═════════════════════════════════════════════════════════════════════════
+# 7) SYSTEMD — servicio del backend
+# ═════════════════════════════════════════════════════════════════════════
+step "7/9  Servicio systemd (backend)"
 
-setup_systemd() {
-    local svc_name="web-dinamica"
-    local svc_path="/etc/systemd/system/${svc_name}.service"
-    local user
-    user="$(id -un)"
+SVC_NAME="web-dinamica"
+SVC_PATH="/etc/systemd/system/${SVC_NAME}.service"
+RUN_USER="$(id -un)"
+NODE_BIN="$(command -v node)"
 
-    if [[ $EUID -ne 0 ]] && ! command -v sudo >/dev/null 2>&1; then
-        log_warn "No soy root y no hay sudo: omito systemd."
-        return 1
-    fi
-
-    log_info "Generando unit file en $svc_path"
-
-    local SUDO=""; [[ $EUID -ne 0 ]] && SUDO="sudo"
-    $SUDO tee "$svc_path" >/dev/null <<EOF
+$SUDO tee "$SVC_PATH" >/dev/null <<EOF
 [Unit]
 Description=Web Dinámica — NestJS backend + SPA
 After=network.target docker.service
@@ -567,16 +393,15 @@ Wants=docker.service
 
 [Service]
 Type=simple
-User=$user
+User=$RUN_USER
 WorkingDirectory=$BACK_DIR
 EnvironmentFile=$BACK_ENV
-ExecStart=$(command -v node) $BACK_DIR/dist/main
+ExecStart=$NODE_BIN $BACK_DIR/dist/main
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=$svc_name
-# Hardening básico
+SyslogIdentifier=$SVC_NAME
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
@@ -587,73 +412,147 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
 
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable "$svc_name"
-    $SUDO systemctl restart "$svc_name"
-    sleep 2
-    if $SUDO systemctl is-active --quiet "$svc_name"; then
-        log_ok "Servicio $svc_name activo (systemctl status $svc_name)"
-        return 0
-    else
-        log_err "El servicio no arrancó. Diagnóstico: journalctl -u $svc_name -n 50"
-        return 1
-    fi
-}
-
-SYSTEMD_OK=0
-if command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
-    if setup_systemd; then
-        SYSTEMD_OK=1
-    fi
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable "$SVC_NAME" >/dev/null 2>&1 || true
+$SUDO systemctl restart "$SVC_NAME"
+sleep 2
+if $SUDO systemctl is-active --quiet "$SVC_NAME"; then
+    log_ok "$SVC_NAME activo"
 else
-    log_warn "systemd no disponible — arranca manualmente con:"
-    log_info "  cd $BACK_DIR && NODE_ENV=production node dist/main"
+    log_err "El servicio no arrancó. Mira: journalctl -u $SVC_NAME -n 50"
+    exit 1
 fi
 
-# ── Resumen final ───────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════
+# 8) CADDY — reverse proxy con TLS automático
+# ═════════════════════════════════════════════════════════════════════════
+step "8/9  Caddy (reverse proxy + TLS)"
+
+if [[ "$USE_TLS" -eq 0 ]]; then
+    log_warn "Caddy/TLS DESACTIVADO (--no-tls)"
+    log_warn "El bundle del front trae URLs https:// horneadas; sin TLS no funcionará el dashboard."
+    log_info "Backend escuchando en http://127.0.0.1:$PORT"
+else
+    $SUDO mkdir -p /var/log/caddy
+    $SUDO tee /etc/caddy/Caddyfile >/dev/null <<EOF
+$DOMAIN_HOST {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+    request_body {
+        max_size 10MB
+    }
+    reverse_proxy 127.0.0.1:$PORT {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50MB
+            roll_keep 5
+        }
+        format console
+    }
+}
+EOF
+    $SUDO caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    $SUDO systemctl enable caddy >/dev/null 2>&1 || true
+    $SUDO systemctl restart caddy
+    sleep 2
+    if $SUDO systemctl is-active --quiet caddy; then
+        log_ok "Caddy activo para $DOMAIN_HOST → 127.0.0.1:$PORT"
+        log_info "El cert de Let's Encrypt se emite automáticamente al primer hit (~10-30s)"
+    else
+        log_err "Caddy no arrancó. Mira: journalctl -u caddy -n 30"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
+# 9) FIREWALL
+# ═════════════════════════════════════════════════════════════════════════
+step "9/9  Firewall (ufw)"
+
+if command -v ufw >/dev/null 2>&1; then
+    UFW_STATUS=$($SUDO ufw status 2>/dev/null | head -1 | awk '{print $2}' || echo "inactive")
+    if [[ "$UFW_STATUS" == "active" ]]; then
+        if [[ "$USE_TLS" -eq 1 ]]; then
+            $SUDO ufw allow 80/tcp >/dev/null 2>&1   && log_ok "ufw: 80/tcp permitido"
+            $SUDO ufw allow 443/tcp >/dev/null 2>&1  && log_ok "ufw: 443/tcp permitido"
+            # Cerramos el 3000 al exterior si estaba abierto
+            $SUDO ufw delete allow "${PORT}/tcp" >/dev/null 2>&1 || true
+        else
+            $SUDO ufw allow "${PORT}/tcp" >/dev/null 2>&1 && log_ok "ufw: ${PORT}/tcp permitido"
+        fi
+    else
+        log_info "ufw instalado pero inactivo (no se filtra ningún puerto a nivel SO)"
+    fi
+else
+    log_info "ufw no instalado, se asume sin firewall local o uno externo del proveedor"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
+# VERIFICACIÓN FINAL
+# ═════════════════════════════════════════════════════════════════════════
+step "Verificación"
+
+sleep 3
+if curl -fsS -o /dev/null -m 5 "http://127.0.0.1:$PORT/api/v1/promotions/active"; then
+    log_ok "Backend responde local en http://127.0.0.1:$PORT"
+else
+    log_warn "Backend no responde aún en local. Logs: journalctl -u $SVC_NAME -n 30"
+fi
+
+if [[ "$USE_TLS" -eq 1 ]]; then
+    log_info "Probando HTTPS (Let's Encrypt puede tardar la primera vez)..."
+    OK=0
+    for i in {1..15}; do
+        if curl -fsS -o /dev/null -m 5 "https://$DOMAIN_HOST/api/v1/promotions/active"; then
+            log_ok "Sitio responde en https://$DOMAIN_HOST"
+            OK=1
+            break
+        fi
+        sleep 3
+    done
+    if [[ "$OK" -eq 0 ]]; then
+        log_warn "HTTPS aún no responde. Diagnóstico:"
+        printf "    journalctl -u caddy -n 30 --no-pager\n"
+        printf "    dig +short $DOMAIN_HOST   # ¿la IP es la de este server?\n"
+        printf "    curl -v http://$DOMAIN_HOST/.well-known/acme-challenge/test\n"
+    fi
+fi
+
+# ═════════════════════════════════════════════════════════════════════════
+# RESUMEN FINAL
+# ═════════════════════════════════════════════════════════════════════════
 printf "\n${BOLD}${GREEN}"
-printf '%.s═' {1..70}; printf "\n"
+printf '═%.0s' {1..70}; printf "\n"
 printf "  INSTALACIÓN COMPLETA\n"
-printf '%.s═' {1..70}
+printf '═%.0s' {1..70}
 printf "${NC}\n\n"
 
-printf "  ${BOLD}Dominio${NC}:        %s\n" "$DOMAIN"
-printf "  ${BOLD}Backend puerto${NC}: %s\n" "${PORT:-3000}"
-printf "  ${BOLD}API${NC}:            %s/api/v1\n" "$DOMAIN"
-printf "  ${BOLD}Admin email${NC}:    %s\n" "${SEED_ADMIN_EMAIL:-N/A}"
-printf "  ${BOLD}DB${NC}:             %s@%s:%s/%s\n" "$DB_USERNAME" "$DB_HOST" "$DB_PORT" "$DB_DATABASE"
-printf "\n"
-
-if [[ "$SYSTEMD_OK" -eq 1 ]]; then
-    printf "  ${BOLD}Servicio${NC}:       systemctl status web-dinamica\n"
-    printf "  ${BOLD}Logs${NC}:           journalctl -u web-dinamica -f\n"
+if [[ "$USE_TLS" -eq 1 ]]; then
+    printf "  ${BOLD}URL${NC}:               https://%s\n" "$DOMAIN_HOST"
 else
-    printf "  ${BOLD}Arranque${NC}:       cd $BACK_DIR && node dist/main\n"
+    printf "  ${BOLD}URL${NC}:               http://%s:%s\n" "$DOMAIN_HOST" "$PORT"
 fi
-
-DOMAIN_HOST="${DOMAIN#https://}"; DOMAIN_HOST="${DOMAIN_HOST#http://}"; DOMAIN_HOST="${DOMAIN_HOST%%/*}"
-
-printf "\n  ${BOLD}Backend escuchando en${NC}: http://127.0.0.1:${PORT:-3000}\n"
-printf "  ${BOLD}URL pública${NC}:           %s\n" "$DOMAIN"
+printf "  ${BOLD}Login${NC}:             %s/login\n" "$DOMAIN"
+printf "  ${BOLD}Admin email${NC}:       %s\n" "$SEED_ADMIN_EMAIL"
+printf "  ${BOLD}Admin password${NC}:    grep SEED_ADMIN_PASSWORD %s\n" "$BACK_ENV"
 printf "\n"
-printf "  ${BOLD}Reverse proxy / TLS${NC}: este instalador NO toca tu proxy.\n"
-printf "     Quien gestione la infraestructura debe apuntar el proxy/LB al\n"
-printf "     puerto ${PORT:-3000} de este host. El backend ya envía\n"
-printf "     X-Forwarded-* y respeta trust-proxy=1.\n"
+printf "  ${BOLD}Servicios${NC}:\n"
+printf "     • Backend:  systemctl status $SVC_NAME\n"
+[[ "$USE_TLS" -eq 1 ]] && printf "     • Caddy:    systemctl status caddy\n"
+printf "     • Postgres: docker ps | grep web_dinamica_db\n"
 printf "\n"
-printf "  ${YELLOW}⚠  Próximos pasos:${NC}\n"
-printf "     1) Verifica que tu proxy externo apunta a 127.0.0.1:${PORT:-3000}\n"
-printf "     2) Comprueba que el sitio responde:\n"
-printf "          curl -I http://127.0.0.1:${PORT:-3000}/api/v1/promotions/active\n"
-printf "          curl -I %s\n" "$DOMAIN"
-printf "     3) Inicia sesión en %s y CAMBIA LA PASSWORD del admin\n" "$DOMAIN"
-printf "     4) Configura backup periódico de Postgres y de ./uploads\n\n"
-
-# Plantillas opcionales de proxy (no se aplican; solo se generan por si las quieres consultar)
-DEPLOY_DIR="$BACK_DIR/deploy"
-if [[ -d "$DEPLOY_DIR" ]]; then
-    GENERATED_DIR="$DEPLOY_DIR/generated"
-    mkdir -p "$GENERATED_DIR"
-    [[ -f "$DEPLOY_DIR/Caddyfile" ]] && sed -e "s|__DOMAIN__|$DOMAIN_HOST|g" -e "s|__PORT__|${PORT:-3000}|g" "$DEPLOY_DIR/Caddyfile" > "$GENERATED_DIR/Caddyfile"
-    [[ -f "$DEPLOY_DIR/nginx.conf" ]] && sed -e "s|__DOMAIN__|$DOMAIN_HOST|g" -e "s|__PORT__|${PORT:-3000}|g" "$DEPLOY_DIR/nginx.conf" > "$GENERATED_DIR/${DOMAIN_HOST}.conf"
-fi
+printf "  ${BOLD}Logs${NC}:\n"
+printf "     • Backend:  journalctl -u $SVC_NAME -f\n"
+[[ "$USE_TLS" -eq 1 ]] && printf "     • Caddy:    journalctl -u caddy -f\n"
+printf "     • Postgres: docker logs -f web_dinamica_db\n"
+printf "\n"
+printf "  ${YELLOW}⚠  Después del primer login: CAMBIA LA PASSWORD del admin${NC}\n\n"
