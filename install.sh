@@ -67,6 +67,14 @@ BACK_ENV_TEMPLATE="$BACK_DIR/.env.production.example"
 FRONT_ENV_PROD="$FRONT_DIR/.env.production"
 PUBLIC_DIR="$BACK_DIR/public"
 
+# Detección: ¿el frontend ya está pre-compilado en public/ (committeado al
+# repo desde la máquina de dev)? Si index.html existe ahí, no recompilamos
+# ni necesitamos la carpeta del front.
+PREBUILT_FRONT=0
+if [[ -f "$PUBLIC_DIR/index.html" ]]; then
+    PREBUILT_FRONT=1
+fi
+
 banner
 
 # ── 1. Verificar / auto-instalar dependencias del sistema ───────────────
@@ -293,7 +301,13 @@ else
     # ¿URLs absolutas en el bundle del frontend?
     # Por defecto NO: el back sirve el front en el mismo origen → paths
     # relativos son más portables (el mismo dist funciona en cualquier dominio).
-    prompt FRONT_ABSOLUTE  "¿Hornear el dominio en el bundle del front? (y/N)"   "N"
+    # Se omite si el frontend ya viene precompilado en public/.
+    if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
+        FRONT_ABSOLUTE="N"
+        log_info "Frontend precompilado detectado en public/ → no se recompilará"
+    else
+        prompt FRONT_ABSOLUTE  "¿Hornear el dominio en el bundle del front? (y/N)"   "N"
+    fi
 
     prompt DB_HOST         "DB host"                          "localhost"
     prompt DB_PORT         "DB port"                          "5432"
@@ -433,42 +447,46 @@ step "5/9  Backend — compilando"
 npm run build
 log_ok "Backend compilado en dist/"
 
-# ── 5. Frontend: dependencias + build con .env.production ───────────────
-step "6/9  Frontend — instalando dependencias y compilando"
+# ── 5. Frontend ─────────────────────────────────────────────────────────
+# Hay tres escenarios posibles:
+#   A) public/ ya trae el build (committeado desde la máquina de dev):
+#      no se hace nada — el dominio ya está horneado, listo para servir.
+#   B) No hay build en public/ pero SÍ está la carpeta del front al lado:
+#      se compila aquí (vite build) y se copia a public/.
+#   C) No hay build ni carpeta del front: error fatal.
+step "6/9  Frontend — preparando bundle"
 
-if [[ ! -d "$FRONT_DIR" ]]; then
-    log_err "No encuentro la carpeta del frontend en $FRONT_DIR"
-    exit 1
-fi
+if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
+    log_ok "Frontend ya compilado en $PUBLIC_DIR (build pre-horneado desde el repo)"
+    log_info "Se omiten 'npm install' y 'vite build' del frontend."
+elif [[ -d "$FRONT_DIR" ]]; then
+    log_info "Build no encontrado en public/, compilando el frontend desde $FRONT_DIR"
 
-# Decidir si el bundle del front lleva URLs absolutas o relativas.
-# - Relativas (default): el mismo dist funciona en cualquier dominio.
-# - Absolutas: hornean DOMAIN en el bundle. Útil sólo si en algún momento
-#   el front se servirá desde un dominio DIFERENTE al backend.
-FRONT_ABS_FLAG="${FRONT_ABSOLUTE:-N}"
-FRONT_ABS_FLAG="$(printf '%s' "$FRONT_ABS_FLAG" | tr '[:upper:]' '[:lower:]')"
+    # Decidir si el bundle del front lleva URLs absolutas o relativas.
+    FRONT_ABS_FLAG="${FRONT_ABSOLUTE:-N}"
+    FRONT_ABS_FLAG="$(printf '%s' "$FRONT_ABS_FLAG" | tr '[:upper:]' '[:lower:]')"
 
-# Backup del .env.production existente para no perder claves de EmailJS si las hubiera.
-EMAILJS_PUB=""; EMAILJS_SVC=""; EMAILJS_T1=""; EMAILJS_T2=""; ADMIN_EMAIL_FRONT=""
-if [[ -f "$FRONT_ENV_PROD" ]]; then
-    EMAILJS_PUB=$(grep -E '^VITE_EMAILJS_PUBLIC_KEY=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-    EMAILJS_SVC=$(grep -E '^VITE_EMAILJS_SERVICE_ID=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-    EMAILJS_T1=$(grep -E '^VITE_EMAILJS_TEMPLATE_CONTACT=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-    EMAILJS_T2=$(grep -E '^VITE_EMAILJS_TEMPLATE_SUBSCRIBE=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-    ADMIN_EMAIL_FRONT=$(grep -E '^VITE_ADMIN_EMAIL=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
-fi
+    # Backup de claves de EmailJS si ya estaban en .env.production
+    EMAILJS_PUB=""; EMAILJS_SVC=""; EMAILJS_T1=""; EMAILJS_T2=""; ADMIN_EMAIL_FRONT=""
+    if [[ -f "$FRONT_ENV_PROD" ]]; then
+        EMAILJS_PUB=$(grep -E '^VITE_EMAILJS_PUBLIC_KEY=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+        EMAILJS_SVC=$(grep -E '^VITE_EMAILJS_SERVICE_ID=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+        EMAILJS_T1=$(grep -E '^VITE_EMAILJS_TEMPLATE_CONTACT=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+        EMAILJS_T2=$(grep -E '^VITE_EMAILJS_TEMPLATE_SUBSCRIBE=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+        ADMIN_EMAIL_FRONT=$(grep -E '^VITE_ADMIN_EMAIL=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+    fi
 
-if [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]]; then
-    log_info "Hornearé el dominio en el bundle del frontend: $DOMAIN"
-    VITE_API_URL_VAL="${DOMAIN%/}/api/v1"
-    VITE_STATIC_URL_VAL="${DOMAIN%/}"
-else
-    log_info "Bundle del frontend con paths relativos (mismo origen, portable)"
-    VITE_API_URL_VAL="/api/v1"
-    VITE_STATIC_URL_VAL=""
-fi
+    if [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]]; then
+        log_info "Hornearé el dominio en el bundle: $DOMAIN"
+        VITE_API_URL_VAL="${DOMAIN%/}/api/v1"
+        VITE_STATIC_URL_VAL="${DOMAIN%/}"
+    else
+        log_info "Bundle con paths relativos (mismo origen, portable)"
+        VITE_API_URL_VAL="/api/v1"
+        VITE_STATIC_URL_VAL=""
+    fi
 
-cat > "$FRONT_ENV_PROD" <<EOF
+    cat > "$FRONT_ENV_PROD" <<EOF
 # Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Modo: $( [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]] && echo "URLs absolutas (dominio horneado)" || echo "paths relativos (mismo origen)" )
 VITE_API_URL=$VITE_API_URL_VAL
@@ -479,30 +497,35 @@ VITE_EMAILJS_TEMPLATE_CONTACT=$EMAILJS_T1
 VITE_EMAILJS_TEMPLATE_SUBSCRIBE=$EMAILJS_T2
 VITE_ADMIN_EMAIL=$ADMIN_EMAIL_FRONT
 EOF
-log_ok "Escrito $FRONT_ENV_PROD"
 
-cd "$FRONT_DIR"
-# Mismo motivo que el backend: vite, @vitejs/plugin-react y tailwindcss
-# son devDependencies y son indispensables para 'vite build'.
-if [[ -f package-lock.json ]]; then
-    npm ci --no-audit --no-fund --include=dev
+    cd "$FRONT_DIR"
+    if [[ -f package-lock.json ]]; then
+        npm ci --no-audit --no-fund --include=dev
+    else
+        npm install --no-audit --no-fund --include=dev
+    fi
+    npm run build
+    log_ok "Frontend compilado en $FRONT_DIR/dist/"
+
+    step "7/9  Copiando dist del frontend a $PUBLIC_DIR"
+    mkdir -p "$PUBLIC_DIR"
+    find "$PUBLIC_DIR" -mindepth 1 -delete
+    cp -R "$FRONT_DIR/dist/." "$PUBLIC_DIR/"
+    log_ok "Frontend copiado a $PUBLIC_DIR"
 else
-    npm install --no-audit --no-fund --include=dev
+    log_err "No hay build en $PUBLIC_DIR/index.html NI carpeta del front en $FRONT_DIR"
+    log_info "Opciones:"
+    log_info "  1) Compila el front en tu máquina de dev y commitea back/public/"
+    log_info "  2) Sube también la carpeta front_web_dinamica_admin junto al back"
+    exit 1
 fi
-log_ok "Dependencias del frontend instaladas (con devDependencies)"
 
-# Vite usa NODE_ENV=production cuando se invoca 'vite build' (es el default).
-npm run build
-log_ok "Frontend compilado en $FRONT_DIR/dist/"
-
-# ── 6. Copiar dist del front al public/ del back ────────────────────────
-step "7/9  Copiando dist del frontend a $PUBLIC_DIR"
-
-mkdir -p "$PUBLIC_DIR"
-# Limpieza segura: borramos el contenido pero NO la carpeta (puede tener .gitkeep).
-find "$PUBLIC_DIR" -mindepth 1 -delete
-cp -R "$FRONT_DIR/dist/." "$PUBLIC_DIR/"
-log_ok "Frontend copiado a $PUBLIC_DIR (servido en /)"
+# Si llegamos con PREBUILT_FRONT=1, el step 7 nunca se imprime; lo logueamos
+# para no confundir al usuario sobre el conteo de pasos.
+if [[ "$PREBUILT_FRONT" -eq 1 ]]; then
+    step "7/9  Copia del frontend"
+    log_ok "Omitida — el build ya está en $PUBLIC_DIR"
+fi
 
 # ── 7. Migraciones + seed del admin ─────────────────────────────────────
 step "8/9  Migraciones y seed del primer admin"
