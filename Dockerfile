@@ -45,6 +45,12 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/tsconfig*.json ./
 COPY --from=builder /app/nest-cli.json ./
 
+# Scripts de bootstrap (auto-heal de migraciones, etc.) y entrypoint.
+COPY scripts ./scripts
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && sed -i 's/\r$//' /entrypoint.sh
+
 # Las imágenes subidas van a /app/uploads (montado como volumen en compose)
 RUN mkdir -p /app/uploads
 
@@ -54,5 +60,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3000/api/v1/promotions/active >/dev/null || exit 1
 
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["node", "dist/main.js"]
+# tini reapa zombies y enruta señales; entrypoint.sh corre el bootstrap
+# de migraciones antes de exec node dist/main.js.
+ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
