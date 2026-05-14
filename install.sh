@@ -320,50 +320,71 @@ else
         COOKIE_DOMAIN_DEFAULT=""
     fi
 
-    # Generar .env
+    # Generar .env de forma segura: TODO valor va entre comillas simples,
+    # escapando comillas simples literales al estilo POSIX (' -> '\'').
+    # Así `bash source .env` no rompe con espacios ni con caracteres como $.
     log_info "Generando $BACK_ENV ..."
     umask 077
-    cat > "$BACK_ENV" <<EOF
-# Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# Edita con cuidado. No comitear este archivo.
 
-NODE_ENV=production
-PORT=$PORT
-API_PREFIX=api/v1
+    write_env() {
+        # write_env NAME VALUE
+        local n="$1" v="$2"
+        v="${v//\'/\'\\\'\'}"
+        printf "%s='%s'\n" "$n" "$v" >> "$BACK_ENV"
+    }
 
-DB_HOST=$DB_HOST
-DB_PORT=$DB_PORT
-DB_USERNAME=$DB_USERNAME
-DB_PASSWORD=$DB_PASSWORD
-DB_DATABASE=$DB_DATABASE
-DB_SYNCHRONIZE=false
-DB_LOGGING=false
+    COOKIE_SECURE_VAL="false"
+    [[ "$DOMAIN" == https://* ]] && COOKIE_SECURE_VAL="true"
 
-JWT_SECRET=$JWT_SECRET
-JWT_EXPIRES_IN=1d
+    : > "$BACK_ENV"
+    {
+        echo "# Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+        echo "# Edita con cuidado. No comitear este archivo."
+        echo ""
+    } >> "$BACK_ENV"
 
-COOKIE_NAME=ws_session
-COOKIE_SECURE=$( [[ "$DOMAIN" == https://* ]] && echo true || echo false )
-COOKIE_SAMESITE=lax
-COOKIE_DOMAIN=$COOKIE_DOMAIN_DEFAULT
+    write_env NODE_ENV          "production"
+    write_env PORT              "$PORT"
+    write_env API_PREFIX        "api/v1"
+    echo "" >> "$BACK_ENV"
 
-CORS_ORIGIN=$DOMAIN
+    write_env DB_HOST           "$DB_HOST"
+    write_env DB_PORT           "$DB_PORT"
+    write_env DB_USERNAME       "$DB_USERNAME"
+    write_env DB_PASSWORD       "$DB_PASSWORD"
+    write_env DB_DATABASE       "$DB_DATABASE"
+    write_env DB_SYNCHRONIZE    "false"
+    write_env DB_LOGGING        "false"
+    echo "" >> "$BACK_ENV"
 
-BCRYPT_SALT_ROUNDS=12
+    write_env JWT_SECRET        "$JWT_SECRET"
+    write_env JWT_EXPIRES_IN    "1d"
+    echo "" >> "$BACK_ENV"
 
-THROTTLE_TTL_MS=60000
-THROTTLE_LIMIT=120
+    write_env COOKIE_NAME       "ws_session"
+    write_env COOKIE_SECURE     "$COOKIE_SECURE_VAL"
+    write_env COOKIE_SAMESITE   "lax"
+    write_env COOKIE_DOMAIN     "$COOKIE_DOMAIN_DEFAULT"
+    echo "" >> "$BACK_ENV"
 
-SEED_ADMIN_EMAIL=$SEED_ADMIN_EMAIL
-SEED_ADMIN_PASSWORD=$SEED_ADMIN_PASSWORD
-SEED_ADMIN_NAME=$SEED_ADMIN_NAME
+    write_env CORS_ORIGIN       "$DOMAIN"
+    write_env BCRYPT_SALT_ROUNDS "12"
+    write_env THROTTLE_TTL_MS   "60000"
+    write_env THROTTLE_LIMIT    "120"
+    echo "" >> "$BACK_ENV"
 
-UPLOAD_DEST=./uploads
-UPLOAD_MAX_SIZE=5242880
+    write_env SEED_ADMIN_EMAIL    "$SEED_ADMIN_EMAIL"
+    write_env SEED_ADMIN_PASSWORD "$SEED_ADMIN_PASSWORD"
+    write_env SEED_ADMIN_NAME     "$SEED_ADMIN_NAME"
+    echo "" >> "$BACK_ENV"
 
-# Memo del instalador (no la lee Nest)
-DOMAIN=$DOMAIN
-EOF
+    write_env UPLOAD_DEST       "./uploads"
+    write_env UPLOAD_MAX_SIZE   "5242880"
+    echo "" >> "$BACK_ENV"
+
+    echo "# Memo del instalador (no la lee Nest)" >> "$BACK_ENV"
+    write_env DOMAIN            "$DOMAIN"
+
     chmod 600 "$BACK_ENV"
     log_ok "$BACK_ENV creado (permisos 600)"
 fi
