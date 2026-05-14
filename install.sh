@@ -419,12 +419,15 @@ fi
 step "4/9  Backend — instalando dependencias"
 
 cd "$BACK_DIR"
+# IMPORTANTE: forzamos --include=dev porque .env tiene NODE_ENV=production y
+# eso haría que npm omita devDependencies (que es donde está @nestjs/cli con
+# el comando 'nest' que necesitamos para compilar).
 if [[ -f package-lock.json ]]; then
-    npm ci --no-audit --no-fund
+    npm ci --no-audit --no-fund --include=dev
 else
-    npm install --no-audit --no-fund
+    npm install --no-audit --no-fund --include=dev
 fi
-log_ok "Dependencias del backend instaladas"
+log_ok "Dependencias del backend instaladas (con devDependencies)"
 
 step "5/9  Backend — compilando"
 npm run build
@@ -479,12 +482,14 @@ EOF
 log_ok "Escrito $FRONT_ENV_PROD"
 
 cd "$FRONT_DIR"
+# Mismo motivo que el backend: vite, @vitejs/plugin-react y tailwindcss
+# son devDependencies y son indispensables para 'vite build'.
 if [[ -f package-lock.json ]]; then
-    npm ci --no-audit --no-fund
+    npm ci --no-audit --no-fund --include=dev
 else
-    npm install --no-audit --no-fund
+    npm install --no-audit --no-fund --include=dev
 fi
-log_ok "Dependencias del frontend instaladas"
+log_ok "Dependencias del frontend instaladas (con devDependencies)"
 
 # Vite usa NODE_ENV=production cuando se invoca 'vite build' (es el default).
 npm run build
