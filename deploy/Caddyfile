@@ -1,0 +1,57 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Caddy — reverse proxy con HTTPS automático (Let's Encrypt)
+# ─────────────────────────────────────────────────────────────────────────
+# Reemplaza __DOMAIN__ por tu dominio (sin https://). El instalador lo hace
+# por ti si invocas: ./install.sh --emit-proxy caddy
+#
+# Instalación (Ubuntu/Debian):
+#   sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+#     | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+#   curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+#     | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+#   sudo apt update && sudo apt install -y caddy
+#
+# Copia este archivo a /etc/caddy/Caddyfile y recarga:
+#   sudo systemctl reload caddy
+# ─────────────────────────────────────────────────────────────────────────
+
+__DOMAIN__ {
+    # TLS automático: Caddy obtiene y renueva el certificado solo.
+    encode zstd gzip
+
+    # Headers de seguridad
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Límite de subida (alineado con UPLOAD_MAX_SIZE del backend: 5 MB).
+    # Ajusta si subes archivos más grandes.
+    request_body {
+        max_size 10MB
+    }
+
+    # Todo al backend NestJS. El propio backend ya distingue entre /api/v1,
+    # /static y la SPA del frontend.
+    reverse_proxy 127.0.0.1:__PORT__ {
+        # Pasa el host real para que el rate-limit y trust-proxy del backend
+        # vean la IP original detrás del proxy.
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Log con rotación
+    log {
+        output file /var/log/caddy/__DOMAIN__-access.log {
+            roll_size 50MB
+            roll_keep 5
+        }
+        format console
+    }
+}

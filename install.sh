@@ -161,7 +161,13 @@ if [[ -f "$BACK_ENV" && "$RESET_ENV" -eq 0 ]]; then
         DOMAIN="${CORS_ORIGIN%%,*}"
     fi
 else
-    prompt DOMAIN          "Dominio público (con https://)"  "https://midominio.com"
+    prompt DOMAIN          "Dominio público que ya apunta a este servidor (con https://)"  "https://marcsol-preview.casacam.net"
+
+    # ¿URLs absolutas en el bundle del frontend?
+    # Por defecto NO: el back sirve el front en el mismo origen → paths
+    # relativos son más portables (el mismo dist funciona en cualquier dominio).
+    prompt FRONT_ABSOLUTE  "¿Hornear el dominio en el bundle del front? (y/N)"   "N"
+
     prompt DB_HOST         "DB host"                          "localhost"
     prompt DB_PORT         "DB port"                          "5432"
     prompt DB_USERNAME     "DB usuario"                       "postgres"
@@ -284,21 +290,45 @@ if [[ ! -d "$FRONT_DIR" ]]; then
     exit 1
 fi
 
-# .env.production: si no existe, lo dejamos con paths relativos (mismo host).
-# Si la plantilla ya está en el repo (lo recomendado), no la sobreescribimos.
-if [[ ! -f "$FRONT_ENV_PROD" ]]; then
-    log_warn "No existe $FRONT_ENV_PROD, creando con paths relativos por defecto."
-    cat > "$FRONT_ENV_PROD" <<'EOF'
-VITE_API_URL=/api/v1
-VITE_STATIC_URL=
-VITE_EMAILJS_PUBLIC_KEY=
-VITE_EMAILJS_SERVICE_ID=
-VITE_EMAILJS_TEMPLATE_CONTACT=
-VITE_EMAILJS_TEMPLATE_SUBSCRIBE=
-VITE_ADMIN_EMAIL=
-EOF
+# Decidir si el bundle del front lleva URLs absolutas o relativas.
+# - Relativas (default): el mismo dist funciona en cualquier dominio.
+# - Absolutas: hornean DOMAIN en el bundle. Útil sólo si en algún momento
+#   el front se servirá desde un dominio DIFERENTE al backend.
+FRONT_ABS_FLAG="${FRONT_ABSOLUTE:-N}"
+FRONT_ABS_FLAG="$(printf '%s' "$FRONT_ABS_FLAG" | tr '[:upper:]' '[:lower:]')"
+
+# Backup del .env.production existente para no perder claves de EmailJS si las hubiera.
+EMAILJS_PUB=""; EMAILJS_SVC=""; EMAILJS_T1=""; EMAILJS_T2=""; ADMIN_EMAIL_FRONT=""
+if [[ -f "$FRONT_ENV_PROD" ]]; then
+    EMAILJS_PUB=$(grep -E '^VITE_EMAILJS_PUBLIC_KEY=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+    EMAILJS_SVC=$(grep -E '^VITE_EMAILJS_SERVICE_ID=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+    EMAILJS_T1=$(grep -E '^VITE_EMAILJS_TEMPLATE_CONTACT=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+    EMAILJS_T2=$(grep -E '^VITE_EMAILJS_TEMPLATE_SUBSCRIBE=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
+    ADMIN_EMAIL_FRONT=$(grep -E '^VITE_ADMIN_EMAIL=' "$FRONT_ENV_PROD" | cut -d= -f2- || true)
 fi
-log_info "Usando $FRONT_ENV_PROD para el build"
+
+if [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]]; then
+    log_info "Hornearé el dominio en el bundle del frontend: $DOMAIN"
+    VITE_API_URL_VAL="${DOMAIN%/}/api/v1"
+    VITE_STATIC_URL_VAL="${DOMAIN%/}"
+else
+    log_info "Bundle del frontend con paths relativos (mismo origen, portable)"
+    VITE_API_URL_VAL="/api/v1"
+    VITE_STATIC_URL_VAL=""
+fi
+
+cat > "$FRONT_ENV_PROD" <<EOF
+# Generado por install.sh — $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# Modo: $( [[ "$FRONT_ABS_FLAG" =~ ^(y|yes|s|si|sí)$ ]] && echo "URLs absolutas (dominio horneado)" || echo "paths relativos (mismo origen)" )
+VITE_API_URL=$VITE_API_URL_VAL
+VITE_STATIC_URL=$VITE_STATIC_URL_VAL
+VITE_EMAILJS_PUBLIC_KEY=$EMAILJS_PUB
+VITE_EMAILJS_SERVICE_ID=$EMAILJS_SVC
+VITE_EMAILJS_TEMPLATE_CONTACT=$EMAILJS_T1
+VITE_EMAILJS_TEMPLATE_SUBSCRIBE=$EMAILJS_T2
+VITE_ADMIN_EMAIL=$ADMIN_EMAIL_FRONT
+EOF
+log_ok "Escrito $FRONT_ENV_PROD"
 
 cd "$FRONT_DIR"
 if [[ -f package-lock.json ]]; then
@@ -425,7 +455,36 @@ else
     printf "  ${BOLD}Arranque${NC}:       cd $BACK_DIR && node dist/main\n"
 fi
 
+# ── Generar archivos de reverse proxy con tu dominio ya rellenado ────────
+DEPLOY_DIR="$BACK_DIR/deploy"
+DOMAIN_HOST="${DOMAIN#https://}"; DOMAIN_HOST="${DOMAIN_HOST#http://}"; DOMAIN_HOST="${DOMAIN_HOST%%/*}"
+GENERATED_DIR="$DEPLOY_DIR/generated"
+mkdir -p "$GENERATED_DIR"
+
+if [[ -f "$DEPLOY_DIR/Caddyfile" ]]; then
+    sed -e "s|__DOMAIN__|$DOMAIN_HOST|g" \
+        -e "s|__PORT__|${PORT:-3000}|g" \
+        "$DEPLOY_DIR/Caddyfile" > "$GENERATED_DIR/Caddyfile"
+fi
+if [[ -f "$DEPLOY_DIR/nginx.conf" ]]; then
+    sed -e "s|__DOMAIN__|$DOMAIN_HOST|g" \
+        -e "s|__PORT__|${PORT:-3000}|g" \
+        "$DEPLOY_DIR/nginx.conf" > "$GENERATED_DIR/${DOMAIN_HOST}.conf"
+fi
+
+printf "\n  ${BOLD}Reverse proxy${NC} (plantillas ya con tu dominio):\n"
+[[ -f "$GENERATED_DIR/Caddyfile" ]]            && printf "     • Caddy: %s\n" "$GENERATED_DIR/Caddyfile"
+[[ -f "$GENERATED_DIR/${DOMAIN_HOST}.conf" ]]  && printf "     • nginx: %s\n" "$GENERATED_DIR/${DOMAIN_HOST}.conf"
+
 printf "\n  ${YELLOW}⚠  Próximos pasos:${NC}\n"
-printf "     1) Pon un reverse proxy (nginx/Caddy) con HTTPS apuntando a puerto $PORT\n"
-printf "     2) Inicia sesión y CAMBIA LA PASSWORD del admin inmediatamente\n"
-printf "     3) Configura un backup periódico de Postgres y de ./uploads\n\n"
+printf "     1) Coloca el reverse proxy con HTTPS apuntando a 127.0.0.1:${PORT:-3000}\n"
+printf "        Caddy (recomendado, TLS automático):\n"
+printf "          sudo cp $GENERATED_DIR/Caddyfile /etc/caddy/Caddyfile\n"
+printf "          sudo systemctl reload caddy\n"
+printf "        nginx + certbot:\n"
+printf "          sudo cp $GENERATED_DIR/${DOMAIN_HOST}.conf /etc/nginx/sites-available/${DOMAIN_HOST}\n"
+printf "          sudo ln -sf /etc/nginx/sites-available/${DOMAIN_HOST} /etc/nginx/sites-enabled/${DOMAIN_HOST}\n"
+printf "          sudo certbot --nginx -d $DOMAIN_HOST\n"
+printf "     2) Inicia sesión en $DOMAIN y CAMBIA LA PASSWORD del admin\n"
+printf "     3) Configura backup periódico de Postgres y de ./uploads\n"
+printf "     4) Verifica DNS:  dig +short $DOMAIN_HOST  → debe devolver la IP de este servidor\n\n"
