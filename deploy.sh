@@ -59,12 +59,23 @@ require_docker() {
     }
 }
 
+fix_crlf() {
+    # Convierte line endings Windows (CRLF) → Unix (LF) si los detecta.
+    # Pasa cuando .env.production se edita en Windows o se scp desde allí.
+    if grep -q $'\r' "$ENV_FILE" 2>/dev/null; then
+        warn "$ENV_FILE tiene line endings de Windows (CRLF), corrigiendo..."
+        sed -i 's/\r$//' "$ENV_FILE"
+        info "Convertido a Unix (LF)"
+    fi
+}
+
 require_env() {
     [[ -f "$ENV_FILE" ]] || {
         err "No existe $ENV_FILE."
         info "Copia .env.production.example a .env.production y rellena los valores."
         exit 1
     }
+    fix_crlf
     # Validar variables críticas
     local missing=()
     for var in SITE_ADDRESS DB_USERNAME DB_PASSWORD DB_DATABASE JWT_SECRET \
@@ -80,11 +91,28 @@ require_env() {
 }
 
 load_env() {
-    # Carga las variables a la shell actual (sin afectar a las del sistema)
-    set -a
-    # shellcheck disable=SC1090
-    source <(grep -E '^[A-Z_]+=' "$ENV_FILE")
-    set +a
+    # Parser propio: tolera espacios, comillas y valores con caracteres
+    # especiales. Más seguro que `source` ante archivos editados a mano.
+    local line key val
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Quitar CR residual (defensa adicional contra CRLF)
+        line="${line%$'\r'}"
+        # Saltar comentarios y líneas vacías
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+        # Solo KEY=VALUE con KEY mayúsculas/dígitos/underscore
+        [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        key="${BASH_REMATCH[1]}"
+        val="${BASH_REMATCH[2]}"
+        # Trim leading whitespace del valor
+        val="${val#"${val%%[![:space:]]*}"}"
+        # Strip comillas envolventes (single o double)
+        if [[ "$val" =~ ^\"(.*)\"$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        elif [[ "$val" =~ ^\'(.*)\'$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        fi
+        export "$key=$val"
+    done < "$ENV_FILE"
 }
 
 # ── Comandos ─────────────────────────────────────────────────────────────
