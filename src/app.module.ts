@@ -20,6 +20,7 @@ import { AdvertisementsModule } from './advertisements/advertisements.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { AuditModule } from './audit/audit.module';
 import { AuditInterceptor } from './audit/audit.interceptor';
+import { SettingsModule } from './settings/settings.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { RolesGuard } from './auth/guards/roles.guard';
 import { SeedsModule } from './database/seeds/seeds.module';
@@ -55,6 +56,10 @@ import { SeedsModule } from './database/seeds/seeds.module';
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
         synchronize: config.get<boolean>('database.synchronize'),
+        // Corre las migraciones pendientes automáticamente al arrancar.
+        // Combinado con migraciones idempotentes (IF NOT EXISTS), es seguro
+        // incluso cuando synchronize=true.
+        migrationsRun: true,
         logging: config.get<boolean>('database.logging'),
       }),
     }),
@@ -114,6 +119,7 @@ import { SeedsModule } from './database/seeds/seeds.module';
     AdvertisementsModule,
     DashboardModule,
     AuditModule,
+    SettingsModule,
     SeedsModule,
   ],
   controllers: [AppController],
